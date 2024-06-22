@@ -1,0 +1,9 @@
+﻿Build started 22-06-2024 20:25:46.
+     1>Project "F:\R&D\Calc-Winservice\SampleService.vcxproj" on node 2 (clean target(s)).
+     1>_PrepareForClean:
+         Deleting file "Debug\Calc-Winservice.lastbuildstate".
+     1>Done Building Project "F:\R&D\Calc-Winservice\SampleService.vcxproj" (clean target(s)).
+
+Build succeeded.
+
+Time Elapsed 00:00:00.03
