@@ -8,8 +8,7 @@ using namespace std;
 #include<userenv.h>
 #pragma comment(lib,"userenv.lib")
 #include <tlhelp32.h>
-
-
+#define NULL_TOKEN 0
 
 SERVICE_STATUS        g_ServiceStatus = {0};
 SERVICE_STATUS_HANDLE g_StatusHandle = NULL;
@@ -22,11 +21,18 @@ DWORD WINAPI ServiceWorkerThread (LPVOID lpParam);
 #define SERVICE_NAME  _T("Calc-Winservice")
 
 
-DWORD GetWinLogonPID( )
+BOOL LogError()
+{	
+	LPSTR messageBuffer = nullptr;
+	DWORD dwerr = GetLastError();
+	size_t size = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+		NULL, dwerr, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)&messageBuffer, 0, NULL);
+	OutputDebugStringA(messageBuffer);
+	return TRUE;
+}
+BOOL GetWinLogonPID( DWORD & dwWinLOGONPID)
 {
-	DWORD dwWinLOGONPid=0;
-
-
+	BOOL bRet = TRUE;
 	HANDLE hProcessSnap = NULL;
 	HANDLE hProcess = NULL;
 	PROCESSENTRY32 pe32;
@@ -36,7 +42,7 @@ DWORD GetWinLogonPID( )
 	hProcessSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
 	if (hProcessSnap == INVALID_HANDLE_VALUE)
 	{
-		return dwWinLOGONPid;
+		return bRet;
 	}
 
 	// Set the size of the structure before using it.
@@ -47,7 +53,7 @@ DWORD GetWinLogonPID( )
 	if (!Process32First(hProcessSnap, &pe32))
 	{
 		CloseHandle(hProcessSnap);          // clean the snapshot object
-		return dwWinLOGONPid;
+		return bRet;
 	}
 
 	// Now walk the snapshot of processes, and
@@ -65,19 +71,18 @@ DWORD GetWinLogonPID( )
 			ProcessIdToSessionId(pe32.th32ProcessID,&dwWinlogonSessionID);
 			if(dwSessionID == dwWinlogonSessionID) 
 			{ 
-				dwWinLOGONPid =pe32.th32ProcessID; 
+				dwWinLOGONPID =pe32.th32ProcessID; 
 				break;
 			}
-
-
 		}
 
 	} while (Process32Next(hProcessSnap, &pe32));
 
 	CloseHandle(hProcessSnap);
 
+	bRet = ERROR_SUCCESS;
 
-	return dwWinLOGONPid ;
+	return bRet ;
 }
 
 int _tmain (int argc, TCHAR *argv[])
@@ -86,8 +91,7 @@ int _tmain (int argc, TCHAR *argv[])
 
 	SERVICE_TABLE_ENTRY ServiceTable[] = 
 	{
-		{SERVICE_NAME, (LPSERVICE_MAIN_FUNCTION) ServiceMain},
-		{NULL, NULL}
+		{SERVICE_NAME, (LPSERVICE_MAIN_FUNCTION) ServiceMain}
 	};
 
 	if (StartServiceCtrlDispatcher (ServiceTable) == FALSE)
@@ -210,11 +214,7 @@ VOID WINAPI ServiceCtrlHandler (DWORD CtrlCode)
 
 		if (g_ServiceStatus.dwCurrentState != SERVICE_RUNNING)
 			break;
-
-		/* 
-		* Perform tasks neccesary to stop the service here 
-		*/
-
+		
 		g_ServiceStatus.dwControlsAccepted = 0;
 		g_ServiceStatus.dwCurrentState = SERVICE_STOP_PENDING;
 		g_ServiceStatus.dwWin32ExitCode = 0;
@@ -236,36 +236,38 @@ VOID WINAPI ServiceCtrlHandler (DWORD CtrlCode)
 
 	OutputDebugString(_T("Calc-Winservice: ServiceCtrlHandler: Exit"));
 }
-HANDLE GetCurrentUserTokenNew()
+BOOL GetWinLogonToken(PHANDLE hWinlogonDupToken)
 {
-	HANDLE currentToken = 0;
-	HANDLE primaryToken = 0;
-
-	DWORD dwSessionId = 0;
-	PHANDLE hUserToken = 0;
-	PHANDLE hTokenDup = 0;
-
-	DWORD dwWinlogonPID = GetWinLogonPID();
-	HANDLE hndWinlogon = OpenProcess(PROCESS_QUERY_INFORMATION,TRUE,dwWinlogonPID);
-
-	if(!OpenProcessToken(hndWinlogon,TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE | TOKEN_QUERY,&currentToken))
+	DWORD dwWinlogonPID = 0;
+	if(GetWinLogonPID(dwWinlogonPID) != ERROR_SUCCESS )
 	{
-		DWORD dwerr= GetLastError();
-
-		CloseHandle(hndWinlogon);
-		return primaryToken;
+		return LogError();
+		
 	}
 
-	if(!DuplicateTokenEx(currentToken, MAXIMUM_ALLOWED, 0, SecurityImpersonation, TokenPrimary, &primaryToken))
+	HANDLE hWinLOGON = OpenProcess(PROCESS_QUERY_INFORMATION,TRUE,dwWinlogonPID);
+	if(hWinLOGON == INVALID_HANDLE_VALUE)
 	{
-		CloseHandle(hndWinlogon);
-		CloseHandle(currentToken); 
-		return primaryToken; 
+		return LogError();
 	}
-	return primaryToken;
+	
+	HANDLE hWinlogonPToken = 0;
+	
+	if(!OpenProcessToken(hWinLOGON,TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE | TOKEN_QUERY,&hWinlogonPToken))
+	{
+		CloseHandle(hWinLOGON);
+		return LogError();
+	}
 
-
+	if(!DuplicateTokenEx(hWinlogonPToken, MAXIMUM_ALLOWED, 0, SecurityImpersonation, TokenPrimary,hWinlogonDupToken))
+	{
+		CloseHandle(hWinLOGON);
+		CloseHandle(hWinlogonPToken); 
+		return LogError();
+	}
+	return ERROR_SUCCESS;
 }
+//below code is not used any more.This is not a tested function
 PHANDLE GetCurrentUserToken()
 {
 	PHANDLE currentToken = 0;
@@ -312,39 +314,42 @@ PHANDLE GetCurrentUserToken()
 }
 BOOL Run(LPCWSTR applicationname, LPWSTR arguments)
 {
-	BOOL bResult=FALSE;
+	BOOL bResult = ERROR_SUCCESS;
 	// Get token of the current user
-	HANDLE primaryToken = GetCurrentUserTokenNew();
-	if (primaryToken == 0)
+	HANDLE hWinLogonToken = NULL;
+	if( GetWinLogonToken(&hWinLogonToken) != ERROR_SUCCESS)
 	{
-		return bResult;
+		return LogError();
 	}
 
 	void* lpEnvironment = NULL;
-
-	//Sleep(5000);
-	//// Get all necessary environment variables of logged in user
-	//// to pass them to the process
-	if(!CreateEnvironmentBlock(&lpEnvironment, primaryToken,FALSE))
-		return false;
-	
-	LPSTR messageBuffer = nullptr;
-
-	 STARTUPINFO si = { sizeof (si) } ;
-    PROCESS_INFORMATION pi = { } ;
-    si.lpDesktop =TEXT("winsta0\\default");
-
-    // Do NOT want to inherit handles here
-    DWORD dwCreationFlags = CREATE_UNICODE_ENVIRONMENT  | CREATE_NEW_CONSOLE;
-    if(!CreateProcessAsUser (primaryToken,applicationname,arguments, NULL,NULL,FALSE,dwCreationFlags, lpEnvironment, NULL, &si, &pi))
+	if(!CreateEnvironmentBlock(&lpEnvironment, hWinLogonToken,FALSE))
 	{
-		DWORD dwerr = GetLastError();
-		size_t size = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-			NULL, dwerr, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)&messageBuffer, 0, NULL);
+		return LogError();
+	}
+	
+	STARTUPINFO si = { sizeof (si) } ;
+	PROCESS_INFORMATION pi = { } ;
+	si.lpDesktop =TEXT("winsta0\\default");
 
+	// Do NOT want to inherit handles here
+	DWORD dwCreationFlags = CREATE_UNICODE_ENVIRONMENT  | CREATE_NEW_CONSOLE;
+	if(	!CreateProcessAsUser(hWinLogonToken,
+								applicationname,
+								arguments,
+								NULL,
+								NULL,
+								FALSE,
+								dwCreationFlags, 
+								lpEnvironment, 
+								NULL, 
+								&si, 
+								&pi))
+	{
+		bResult = LogError();
 	}
 	DestroyEnvironmentBlock (lpEnvironment);
-	CloseHandle(primaryToken);
+	CloseHandle(hWinLogonToken);
 	return bResult;
 }
 DWORD WINAPI ServiceWorkerThread (LPVOID lpParam)
@@ -352,7 +357,7 @@ DWORD WINAPI ServiceWorkerThread (LPVOID lpParam)
 	OutputDebugString(_T("Calc-Winservice: ServiceWorkerThread: Entry"));
 
 	//  Periodically check if the service has been requested to stop
-	
+
 	LPCWSTR appname= L"notepad.exe";
 	LPWSTR arg = L"7sample.txt"; 
 	Run(appname,arg);
@@ -362,11 +367,6 @@ DWORD WINAPI ServiceWorkerThread (LPVOID lpParam)
 		Sleep(5000);
 		OutputDebugString(TEXT("I am in Service worker thread"));
 	}
-
-
-
-	//	//Sleep(3000);
-	//}
 
 	OutputDebugString(_T("Calc-Winservice: ServiceWorkerThread: Exit"));
 
